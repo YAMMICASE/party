@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Новогодний корпоратив</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#2a2633;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  canvas{display:block}
+  #hud{position:fixed;top:10px;left:10px;color:#fff;background:rgba(0,0,0,.35);padding:8px 12px;border-radius:10px;font-size:13px;line-height:1.55}
+  #join{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(20,18,28,.88);z-index:10}
+  #join .box{background:#fff;padding:24px;border-radius:18px;text-align:center;width:290px}
+  #join h2{margin:0 0 6px}
+  #join input{width:100%;box-sizing:border-box;padding:10px;font-size:16px;border:2px solid #ddd;border-radius:10px;margin:12px 0}
+  #join button{padding:10px 22px;font-size:16px;border:0;border-radius:10px;background:#3f9a62;color:#fff;cursor:pointer}
+  #err{color:#c0392b;font-size:13px;margin-top:10px;min-height:16px}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="hud">
+  🎄 Онлайн: <b id="online">0</b><br>
+  · Стрелки — ходить<br>
+  · 1 — танец<br>
+  · 2 — бенгальский огонь<br>
+  · 3 — шампанское
+</div>
+
+<div id="join">
+  <div class="box">
+    <h2>🎄 Корпоратив</h2>
+    <div>Как тебя зовут?</div>
+    <input id="name" maxlength="16" placeholder="Имя" autocomplete="off">
+    <button id="go">Войти</button>
+    <div id="err"></div>
+  </div>
+</div>
+
+<script>
+// ---------- НАСТРОЙКИ МАСШТАБА ----------
+const PlayerScale = 1.4; // МАСШТАБ ЧЕЛОВЕЧКА (1.4 = больше на 40%)
+
+const INK = '#2b2b2b';
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+let layout = null, myId = null, ws = null, online = 0, video = null, dpr = 1;
+const players = new Map();
+
+function resize(){
+  dpr = window.devicePixelRatio || 1;
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr;
+  cv.style.width = innerWidth + 'px'; cv.style.height = innerHeight + 'px';
+}
+addEventListener('resize', resize); resize();
+
+/* ---------- Вход ---------- */
+const nameInput = document.getElementById('name');
+nameInput.value = localStorage.getItem('partyName') || '';
+nameInput.focus();
+document.getElementById('go').onclick = join;
+nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') join(); });
+
+function join(){
+  const name = nameInput.value.trim();
+  localStorage.setItem('partyName', name);
+  nameInput.blur();
+  document.getElementById('err').textContent = '';
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => ws.send(JSON.stringify({type:'join', name}));
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'welcome'){
+      myId = m.id; layout = m.layout; setupScreen();
+      document.getElementById('join').style.display = 'none';
+    } else if (m.type === 'state') applyState(m);
+  };
+  ws.onclose = () => {
+    document.getElementById('join').style.display = 'flex';
+    document.getElementById('err').textContent = 'Соединение потеряно. Нажми «Войти» ещё раз.';
+  };
+}
+
+function hash(s){ let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0; return (Math.abs(h) % 1000) / 100; }
+
+function applyState(m){
+  online = m.players.length;
+  const seen = new Set();
+  for (const s of m.players){
+    seen.add(s.id);
+    const p = players.get(s.id);
+    if (!p) players.set(s.id, {...s, rx:s.x, ry:s.y, seed:hash(s.id)});
+    else Object.assign(p, s);
+  }
+  for (const id of [...players.keys()]) if (!seen.has(id)) players.delete(id);
+  updateButtons();
+}
+
+function setupScreen(){
+  const s = layout.screen;
+  if (s.on && s.videoUrl && !video){
+    video = document.createElement('video');
+    video.src = s.videoUrl; video.muted = true; video.loop = true; video.playsInline = true;
+    video.play().catch(()=>{});
+  }
+}
+
+/* ---------- Управление ---------- */
+const keys = {up:false, down:false, left:false, right:false};
+const keyMap = {ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right',
+                KeyW:'up', KeyS:'down', KeyA:'left', KeyD:'right'};
+function send(o){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function sendInput(){ send({type:'input', ...keys}); }
+function act(a){ send({type:'action', action:a}); }
+
+addEventListener('keydown', e => {
+  if (!myId || document.activeElement === nameInput) return;
+  const k = keyMap[e.code];
+  if (k){ e.preventDefault(); if (!keys[k]){ keys[k] = true; sendInput(); } return; }
+  if (e.repeat) return;
+  if (e.code === 'Digit1') act('dance');
+  if (e.code === 'Digit2') act('sparkler');
+  if (e.code === 'Digit3') act('champagne');
+});
+addEventListener('keyup', e => { const k = keyMap[e.code]; if (k && keys[k]){ keys[k] = false; sendInput(); } });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; sendInput(); });
+document.querySelectorAll('#actions button').forEach(b =>
+  b.addEventListener('click', () => { act(b.dataset.a); b.blur(); }));
+function updateButtons(){
+  const me = players.get(myId);
+  document.querySelectorAll('#actions button').forEach(b =>
+    b.classList.toggle('on', !!me && me.action === b.dataset.a));
+}
+
+/* ---------- Хелперы отрисовки ---------- */
+function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function ell(x,y,rx,ry){ ctx.beginPath(); ctx.ellipse(x,y,rx,ry,0,0,Math.PI*2); }
+function circ(x,y,r){ ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); }
+function line(x1,y1,x2,y2){ ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); }
+function star(x,y,r,c){
+  ctx.beginPath();
+  for (let i=0;i<10;i++){ const a = -Math.PI/2 + i*Math.PI/5, rad = i%2 ? r*0.45 : r; ctx.lineTo(x+Math.cos(a)*rad, y+Math.sin(a)*rad); }
+  ctx.closePath(); ctx.fillStyle = c; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 2; ctx.stroke();
+}
+
+/* ---------- Локация ---------- */
+function drawStage(r, t){
+  ctx.fillStyle = 'rgba(0,0,0,.12)'; rr(r.x+6, r.y+12, r.w, r.h+16, 22); ctx.fill();
+  ctx.fillStyle = '#b89f80'; rr(r.x, r.y+20, r.w, r.h, 22); ctx.fill();
+  ctx.strokeStyle = INK; ctx.lineWidth = 3; ctx.stroke();
+  ctx.fillStyle = '#dcc9ae'; rr(r.x, r.y, r.w, r.h, 22); ctx.fill(); ctx.stroke();
+  for (const [fx, ph] of [[0.3,0],[0.7,1.7]]){
+    const cx = r.x + r.w*fx + Math.sin(t/1200+ph)*90, cy = r.y + r.h*0.62;
+    const g = ctx.createRadialGradient(cx,cy,0,cx,cy,100);
+    g.addColorStop(0,'rgba(255,240,180,.6)'); g.addColorStop(1,'rgba(255,240,180,0)');
+    ctx.fillStyle = g; circ(cx,cy,100); ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.font = '700 13px system-ui'; ctx.textAlign = 'center';
+  ctx.fillText('С Ц Е Н А', r.x + r.w/2, r.y + r.h + 14);
+}
+
+function drawScreen(s, t){
+  ctx.strokeStyle = INK; ctx.lineWidth = 3.5;
+  line(s.x+36, s.y+s.h, s.x+36, s.y+s.h+24);
+  line(s.x+s.w-36, s.y+s.h, s.x+s.w-36, s.y+s.h+24);
+  ctx.fillStyle = '#2b2b30'; rr(s.x, s.y, s.w, s.h, 10); ctx.fill();
+  const ix = s.x+10, iy = s.y+10, iw = s.w-20, ih = s.h-20;
+  if (s.on && video && video.readyState >= 2){
+    ctx.drawImage(video, ix, iy, iw, ih);
+  } else {
+    ctx.fillStyle = '#141417'; ctx.fillRect(ix, iy, iw, ih);
+    ctx.fillStyle = 'rgba(255,255,255,.05)';
+    ctx.beginPath(); ctx.moveTo(ix,iy); ctx.lineTo(ix+iw*0.35,iy); ctx.lineTo(ix+iw*0.15,iy+ih); ctx.lineTo(ix,iy+ih); ctx.fill();
+    ctx.fillStyle = '#5a5a62'; ctx.font = '16px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(s.on ? 'загрузка…' : 'экран выключен', s.x + s.w/2, s.y + s.h/2 + 5);
+    ctx.fillStyle = `rgba(255,60,60,${0.45 + 0.4*Math.sin(t/400)})`;
+    circ(s.x+s.w-22, s.y+s.h-20, 4); ctx.fill();
+  }
+}
+
+function drawDanceFloor(r, t){
+  const n = 60, cols = Math.round(r.w/n), rows = Math.round(r.h/n);
+  const pal = ['#ff8fab','#ffd166','#8ecae6','#b5e48c','#cdb4db'];
+  const beat = Math.floor(t/500);
+  ctx.fillStyle = 'rgba(0,0,0,.12)'; rr(r.x+6, r.y+8, r.w, r.h, 12); ctx.fill();
+  ctx.fillStyle = '#3a3346'; rr(r.x, r.y, r.w, r.h, 10); ctx.fill();
+  for (let i=0;i<cols;i++) for (let j=0;j<rows;j++){
+    ctx.fillStyle = pal[(i*3 + j*7 + beat) % pal.length];
+    ctx.globalAlpha = ((i + j + beat) % 3 === 0) ? 0.95 : 0.5;
+    ctx.fillRect(r.x + i*n + 2, r.y + j*n + 2, n-4, n-4);
+  }
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = INK; ctx.lineWidth = 3; rr(r.x, r.y, r.w, r.h, 10); ctx.stroke();
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.font = '700 13px system-ui'; ctx.textAlign = 'center';
+  ctx.fillText('Т А Н Ц П О Л', r.x + r.w/2, r.y + r.h + 22);
+}
+
+function gift(x, y, s, c){
+  ctx.fillStyle = c; ctx.fillRect(x, y-s, s, s);
+  ctx.strokeStyle = INK; ctx.lineWidth = 2.5; ctx.strokeRect(x, y-s, s, s);
+  ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 3.5;
+  line(x+s/2, y-s, x+s/2, y); line(x, y-s/2, x+s, y-s/2);
+}
+
+const LIGHTS = [[-56,-48],[-11,-56],[36,-48],[73,-42],[-42,-115],[3,-129],[42,-118],[-25,-174],[22,-179],[0,-207]];
+function drawTree(tr, t){
+  const x = tr.x, y = tr.y;
+  ctx.fillStyle = 'rgba(0,0,0,.15)'; ell(x, y, 92, 20); ctx.fill();
+  ctx.fillStyle = '#8a5a3b'; ctx.fillRect(x-11, y-39, 22, 36);
+  ctx.strokeStyle = INK; ctx.lineWidth = 3; ctx.strokeRect(x-11, y-39, 22, 36);
+  for (const [by, hw, h] of [[y-31,101,115],[y-98,81,98],[y-157,62,87]]){
+    ctx.beginPath(); ctx.moveTo(x-hw, by); ctx.lineTo(x+hw, by); ctx.lineTo(x, by-h); ctx.closePath();
+    ctx.fillStyle = '#3f9a62'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 3; ctx.stroke();
+  }
+  const cols = ['#ff4d6d','#ffd166','#4cc9f0','#ffffff'];
+  LIGHTS.forEach(([dx,dy], i) => {
+    const on = ((i + Math.floor(t/400)) % 3) !== 0;
+    ctx.fillStyle = on ? cols[i%4] : 'rgba(255,255,255,.25)';
+    circ(x+dx, y+dy, 5.5); ctx.fill();
+  });
+  star(x, y-246, 18, '#ffd166');
+  gift(x-84, y+3, 31, '#e8604c');
+  gift(x+56, y+8, 25, '#5aa9e6');
+}
+
+function drawTable(r){
+  const topH = r.h - 30, cy = r.y + topH/2;
+  ctx.fillStyle = 'rgba(0,0,0,.15)'; ell(r.x + r.w/2, r.y + r.h + 3, r.w/2 + 16, 16); ctx.fill();
+  ctx.strokeStyle = INK; ctx.lineWidth = 4;
+  line(r.x+22, r.y+topH, r.x+22, r.y+r.h); line(r.x+r.w-22, r.y+topH, r.x+r.w-22, r.y+r.h);
+  ctx.lineWidth = 3;
+  ctx.fillStyle = '#fffaf3'; rr(r.x-5, r.y, r.w+10, topH, 10); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#e8604c'; rr(r.x-5, r.y+topH-8, r.w+10, 22, 5); ctx.fill(); ctx.stroke();
+
+  const plate = (px, food) => {
+    ctx.fillStyle = '#fff'; ell(px, cy, 28, 18); ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = INK; ctx.stroke();
+    food(px);
+  };
+  plate(r.x + r.w*0.12, px => { ctx.fillStyle = '#ff9f1c'; for (const [dx,dy] of [[-8,-3],[7,-4],[0,5]]){ circ(px+dx, cy+dy, 7); ctx.fill(); } });
+  plate(r.x + r.w*0.30, px => { ctx.fillStyle = '#f6e7a1'; ell(px, cy, 18, 11); ctx.fill(); ctx.fillStyle = '#6ab04c'; for (const dx of [-7,0,7]){ circ(px+dx, cy-1, 2.5); ctx.fill(); } });
+  plate(r.x + r.w*0.68, px => { ctx.fillStyle = '#f4d58d'; ctx.fillRect(px-14, cy-7, 11, 11); ctx.fillRect(px+3, cy-6, 11, 11); ctx.fillStyle = '#e63946'; circ(px-8, cy-3, 3); ctx.fill(); circ(px+8, cy-2, 3); ctx.fill(); });
+
+  // торт
+  const cx = r.x + r.w*0.49;
+  ctx.fillStyle = '#ffafcc'; rr(cx-28, cy-22, 56, 30, 5); ctx.fill(); ctx.lineWidth = 2.5; ctx.stroke();
+  ctx.fillStyle = '#ffe5ec'; ell(cx, cy-22, 28, 7); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = '#e63946'; ctx.lineWidth = 3; line(cx, cy-25, cx, cy-42);
+  ctx.fillStyle = '#ffd166'; ell(cx, cy-47, 3.5, 5.5); ctx.fill();
+
+  // бутылка и бокалы
+  const bx = r.x + r.w*0.86;
+  ctx.fillStyle = '#1f5f3a'; ctx.strokeStyle = INK; ctx.lineWidth = 2.5;
+  rr(bx-10, cy-30, 20, 39, 5); ctx.fill(); ctx.stroke();
+  ctx.fillRect(bx-4, cy-47, 8, 18); ctx.strokeRect(bx-4, cy-47, 8, 18);
+  ctx.fillStyle = '#ffd166'; ctx.fillRect(bx-5, cy-50, 10, 8);
+  for (const gx of [r.x + r.w*0.77, r.x + r.w*0.95]){
+    ctx.beginPath(); ctx.moveTo(gx-5, cy-19); ctx.lineTo(gx+5, cy-19); ctx.lineTo(gx+3, cy-3); ctx.lineTo(gx-3, cy-3); ctx.closePath();
+    ctx.fillStyle = 'rgba(255,214,102,.9)'; ctx.fill(); ctx.lineWidth = 2; ctx.stroke();
+    line(gx, cy-3, gx, cy+5); line(gx-4, cy+5, gx+4, cy+5);
+  }
+}
+
+/* ---------- Отрисовка человечка (с учётом PlayerScale) ---------- */
+function drawSparkler(hx, hy, dir){
+  const tx = hx + dir*8, ty = hy - 16;
+  ctx.strokeStyle = '#8a8a8a'; ctx.lineWidth = 1.5; line(hx, hy, tx, ty);
+  const g = ctx.createRadialGradient(tx,ty,0,tx,ty,24);
+  g.addColorStop(0,'rgba(255,235,160,.95)'); g.addColorStop(1,'rgba(255,200,80,0)');
+  ctx.fillStyle = g; circ(tx, ty, 24); ctx.fill();
+  ctx.lineWidth = 1.2;
+  for (let i=0;i<20;i++){
+    const a = Math.random()*Math.PI*2, l = 5 + Math.random()*16;
+    ctx.strokeStyle = `hsl(${30 + Math.random()*30},100%,${50 + Math.random()*25}%)`;
+    line(tx + Math.cos(a)*2, ty + Math.sin(a)*2, tx + Math.cos(a)*l, ty + Math.sin(a)*l);
+  }
+  ctx.strokeStyle = INK;
+}
+
+function drawGlass(hx, hy, dir, sip, ph){
+  ctx.save(); ctx.translate(hx, hy); ctx.rotate(-sip*1.1*dir);
+  ctx.strokeStyle = INK; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(-3.5,-14); ctx.lineTo(3.5,-14); ctx.lineTo(2,-2); ctx.lineTo(-2,-2); ctx.closePath();
+  ctx.fillStyle = 'rgba(255,214,102,.95)'; ctx.fill(); ctx.stroke();
+  line(0,-2,0,4); line(-3,4,3,4);
+  if (sip < 0.2){
+    for (let i=0;i<3;i++){
+      const k = (ph*1.2 + i/3) % 1;
+      ctx.fillStyle = `rgba(230,180,60,${1-k})`;
+      circ(Math.sin(ph*5 + i)*2, -16 - k*14, 1.6); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+function drawPlayer(p, t){
+  const ph = t/1000 + p.seed, dir = p.dir < 0 ? -1 : 1, a = p.action;
+  let bob = 0, tilt = 0, headTilt = 0, legB = 0, legF = 0, armB = 0.3, armF = 0.3, sip = 0;
+
+  if (p.moving){
+    const s = Math.sin(ph*12);
+    legB = s*0.55; legF = -s*0.55; armB = 0.3 - s*0.5; armF = 0.3 + s*0.5;
+    bob = -Math.abs(Math.cos(ph*12))*2;
+  }
+  if (a === 'dance'){
+    const s = Math.sin(ph*9);
+    bob = -Math.abs(s)*7; tilt = Math.sin(ph*4.5)*0.25;
+    legB = Math.max(0, s)*0.9; legF = -Math.max(0, -s)*0.9;
+    armB = -(2.1 + s*0.5); armF = 2.1 - s*0.5;
+  } else if (a === 'sparkler'){
+    armF = 2.2 + Math.sin(ph*3)*0.35;
+  } else if (a === 'champagne'){
+    const c = (ph % 2.4) / 2.4;
+    sip = (c > 0.35 && c < 0.85) ? Math.sin((c - 0.35)/0.5*Math.PI) : 0;
+    armF = 0.9 + sip*1.5; headTilt = -sip*0.25;
+  }
+
+  ctx.save();
+  ctx.translate(p.rx, p.ry);
+  ctx.scale(PlayerScale, PlayerScale); // масштабируем фигуру человека
+
+  ctx.fillStyle = 'rgba(0,0,0,.18)'; ell(0, 0, 13, 5); ctx.fill();
+
+  // Имя над головой
+  ctx.font = '600 12px system-ui'; ctx.textAlign = 'center';
+  const w = ctx.measureText(p.name).width + 12;
+  ctx.fillStyle = p.id === myId ? 'rgba(255,209,102,.95)' : 'rgba(255,255,255,.85)';
+  rr(-w/2, -88, w, 17, 8); ctx.fill();
+  ctx.fillStyle = INK; ctx.fillText(p.name, 0, -75.5);
+
+  ctx.translate(0, bob);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = INK;
+
+  // Ноги
+  const H = -14;
+  ctx.lineWidth = 3;
+  const leg = (hx, an) => {
+    const fx = hx + Math.sin(an)*13*dir, fy = H + Math.cos(an)*13;
+    ctx.beginPath(); ctx.moveTo(hx, H); ctx.lineTo(fx, fy); ctx.lineTo(fx + 4*dir, fy); ctx.stroke();
+  };
+  leg(-3*dir, legB); leg(3*dir, legF);
+
+  // Корпус
+  ctx.save(); ctx.translate(0, H); ctx.rotate(tilt);
+  const sh = -12;
+  const arm = (sx, an) => {
+    const ex = sx + Math.sin(an)*14*dir, ey = sh + Math.cos(an)*14;
+    ctx.beginPath(); ctx.moveTo(sx, sh); ctx.lineTo(ex, ey); ctx.stroke();
+    return [ex, ey];
+  };
+  ctx.lineWidth = 3; arm(-4*dir, armB);
+
+  ctx.fillStyle = p.color; ell(0, -8, 8, 11); ctx.fill(); ctx.lineWidth = 2.5; ctx.stroke();
+
+  // Большая голова
+  ctx.save(); ctx.translate(0, -30); ctx.rotate(headTilt*dir);
+  circ(0, 0, 15); ctx.fillStyle = p.color; ctx.fill(); ctx.stroke();
+  ctx.fillStyle = INK; circ(dir*3, -3, 2.3); ctx.fill(); circ(dir*9, -3, 2.3); ctx.fill();
+  if (a){ ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(dir*6, 3, 4, 0.15*Math.PI, 0.85*Math.PI); ctx.stroke(); }
+  ctx.restore();
+
+  ctx.lineWidth = 3;
+  const [hx, hy] = arm(4*dir, armF);
+  if (a === 'sparkler') drawSparkler(hx, hy, dir);
+  if (a === 'champagne') drawGlass(hx, hy, dir, sip, ph);
+  ctx.restore();
+
+  // Ноты при танце
+  if (a === 'dance'){
+    ctx.font = '16px system-ui'; ctx.textAlign = 'center';
+    for (let i=0;i<2;i++){
+      const k = (ph*0.7 + i*0.5) % 1;
+      ctx.fillStyle = `rgba(70,40,110,${1-k})`;
+      ctx.fillText(i ? '♫' : '♪', (i ? -1 : 1)*(22 + k*8), -50 - k*28);
+    }
+  }
+  ctx.restore();
+}
+
+/* ---------- Основной цикл ---------- */
+function drawWorld(t){
+  const L = layout;
+  ctx.fillStyle = '#f6f0e6'; rr(0, 0, L.w, L.h, 24); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,.05)';
+  for (let x=40; x<L.w; x+=40) for (let y=40; y<L.h; y+=40) ctx.fillRect(x-1, y-1, 2, 2);
+
+  drawDanceFloor(L.danceFloor, t);
+  drawStage(L.stage, t);
+  drawScreen(L.screen, t);
+
+  const ents = [
+    {y: L.tree.y, d: () => drawTree(L.tree, t)},
+    {y: L.table.y + L.table.h, d: () => drawTable(L.table)},
+  ];
+  for (const p of players.values()) ents.push({y: p.ry, d: () => drawPlayer(p, t)});
+  ents.sort((a, b) => a.y - b.y).forEach(e => e.d());
+
+  ctx.strokeStyle = 'rgba(0,0,0,.18)'; ctx.lineWidth = 4; rr(2, 2, L.w-4, L.h-4, 22); ctx.stroke();
+}
+
+let last = performance.now();
+function frame(now){
+  const dt = Math.min(0.1, (now - last)/1000); last = now;
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.fillStyle = '#2a2633'; ctx.fillRect(0, 0, cv.width, cv.height);
+  if (layout){
+    const s = Math.min(innerWidth/layout.w, innerHeight/layout.h) * 0.97;
+    const ox = (innerWidth - layout.w*s)/2, oy = (innerHeight - layout.h*s)/2;
+    ctx.setTransform(dpr*s, 0, 0, dpr*s, dpr*ox, dpr*oy);
+    const k = Math.min(1, dt*15);
+    for (const p of players.values()){ p.rx += (p.x - p.rx)*k; p.ry += (p.y - p.ry)*k; }
+    drawWorld(now);
+  }
+  document.getElementById('online').textContent = online;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
